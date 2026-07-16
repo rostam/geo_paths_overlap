@@ -78,6 +78,43 @@ def test_result_roundtrips_through_geoparquet(result, tmp_path):
     assert back.geometry.geom_type.eq("LineString").all()
 
 
+@pytest.fixture(scope="module")
+def parquet_pair(tmp_path_factory):
+    d = tmp_path_factory.mktemp("data")
+    a, b = build()
+    a.to_parquet(d / "a.parquet")
+    b.to_parquet(d / "b.parquet")
+    return d / "a.parquet", d / "b.parquet"
+
+
+def test_accepts_parquet_paths(parquet_pair, result):
+    path_a, path_b = parquet_pair
+    from_paths = find_overlaps(
+        str(path_a), str(path_b), PARAMS, id_col_a="road_id", id_col_b="road_id"
+    )
+    assert list(from_paths["id_a"]) == list(result["id_a"])
+    assert from_paths["overlap_length_m"].tolist() == pytest.approx(
+        result["overlap_length_m"].tolist()
+    )
+
+
+def test_accepts_a_path_and_a_frame_together(parquet_pair, result):
+    path_a, _ = parquet_pair
+    _, gdf_b = build()
+    mixed = find_overlaps(
+        path_a, gdf_b, PARAMS, id_col_a="road_id", id_col_b="road_id"
+    )
+    assert list(mixed["id_a"]) == list(result["id_a"])
+
+
+def test_missing_file_and_bad_type_are_reported_clearly(parquet_pair):
+    path_a, _ = parquet_pair
+    with pytest.raises(FileNotFoundError):
+        find_overlaps(path_a, "does_not_exist.parquet", PARAMS)
+    with pytest.raises(TypeError):
+        find_overlaps(path_a, 42, PARAMS)
+
+
 def test_no_overlaps_still_produces_a_valid_empty_frame(tmp_path):
     a, b = build()
     empty = find_overlaps(a, b.iloc[0:0], PARAMS, id_col_a="road_id", id_col_b="road_id")

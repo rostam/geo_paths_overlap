@@ -12,7 +12,9 @@ it appears in the left dataset.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
@@ -35,6 +37,23 @@ class OverlapParams:
     min_overlap_m: float = DEFAULT_MIN_OVERLAP_M
     max_gap_m: float = DEFAULT_MAX_GAP_M
     directional: bool = False  # True = a line running the other way is not a match
+
+
+PathOrFrame = "str | os.PathLike | gpd.GeoDataFrame"
+
+
+def _as_gdf(src) -> gpd.GeoDataFrame:
+    """Accept an already-loaded GeoDataFrame or a path to a GeoParquet file."""
+    if isinstance(src, gpd.GeoDataFrame):
+        return src
+    if isinstance(src, (str, os.PathLike)):
+        path = Path(src)
+        if not path.exists():
+            raise FileNotFoundError(f"no such GeoParquet file: {path}")
+        return gpd.read_parquet(path)
+    raise TypeError(
+        f"expected a GeoDataFrame or a path to a GeoParquet file, got {type(src).__name__}"
+    )
 
 
 def _to_single_line(geom):
@@ -142,19 +161,24 @@ def _match_pair(line_a: LineString, line_b: LineString, p: OverlapParams) -> lis
 
 
 def find_overlaps(
-    gdf_a: gpd.GeoDataFrame,
-    gdf_b: gpd.GeoDataFrame,
+    source_a,
+    source_b,
     params: OverlapParams | None = None,
     id_col_a: str | None = None,
     id_col_b: str | None = None,
 ) -> gpd.GeoDataFrame:
-    """Match every line in `gdf_a` against every nearby line in `gdf_b`.
+    """Match every line in `source_a` against every nearby line in `source_b`.
+
+    Each source is either a path to a GeoParquet file or an already-loaded
+    GeoDataFrame; the two can be mixed freely.
 
     Both inputs are projected to a metre-based CRS so that the tolerances mean
     what they say. Geometry in the result is in that same metric CRS reprojected
-    back to `gdf_a`'s original CRS.
+    back to the left input's original CRS.
     """
     p = params or OverlapParams()
+    gdf_a = _as_gdf(source_a)
+    gdf_b = _as_gdf(source_b)
     if gdf_a.crs is None or gdf_b.crs is None:
         raise ValueError("both inputs need a CRS")
 
@@ -222,11 +246,9 @@ def main() -> None:
     ap.add_argument("--id-col-b")
     args = ap.parse_args()
 
-    gdf_a = gpd.read_parquet(args.file_a)
-    gdf_b = gpd.read_parquet(args.file_b)
     res = find_overlaps(
-        gdf_a,
-        gdf_b,
+        args.file_a,
+        args.file_b,
         OverlapParams(
             tolerance_m=args.tolerance_m,
             step_m=args.step_m,

@@ -10,6 +10,24 @@ even when the two are offset from each other by some distance.
 .venv/bin/python -m pytest test_overlap.py
 ```
 
+## Use as a library
+
+`find_overlaps` takes either a path to a GeoParquet file or an already-loaded
+GeoDataFrame for each side, and the two can be mixed:
+
+```python
+from overlap import find_overlaps, OverlapParams
+
+overlaps = find_overlaps(
+    "a.parquet", gdf_b,                                  # path, frame, or both
+    OverlapParams(tolerance_m=20.0, min_overlap_m=50.0),
+    id_col_a="road_id", id_col_b="road_id",              # omit to use the index
+)
+```
+
+Each input needs a CRS set and linestring geometry. A MultiLineString is merged
+into one line where its parts connect; where they don't, the longest part is used.
+
 ## How matching works
 
 Line A is sampled every `--step-m` metres. A sample counts as overlapping when it
