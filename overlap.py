@@ -18,6 +18,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
+import pandas as pd
 from shapely.geometry import LineString, MultiLineString
 from shapely.ops import linemerge, substring
 from shapely.strtree import STRtree
@@ -41,19 +42,83 @@ class OverlapParams:
 
 PathOrFrame = "str | os.PathLike | gpd.GeoDataFrame"
 
+_GEOM_NAME_HINTS = ("geometry", "geom", "shape", "wkb", "wkt", "linestring")
 
-def _as_gdf(src) -> gpd.GeoDataFrame:
-    """Accept an already-loaded GeoDataFrame or a path to a GeoParquet file."""
+
+def _guess_geometry_col(df: pd.DataFrame) -> str:
+    """Find the column holding WKB/WKT geometry in a plain parquet."""
+    named = [c for c in df.columns if any(h in str(c).lower() for h in _GEOM_NAME_HINTS)]
+    candidates = named or list(df.columns)
+    for col in candidates:
+        sample = df[col].dropna().head(1)
+        if sample.empty:
+            continue
+        val = sample.iloc[0]
+        if isinstance(val, (bytes, bytearray)):
+            return col
+        if isinstance(val, str) and val.strip().upper().startswith(
+            ("LINESTRING", "MULTILINESTRING", "SRID=")
+        ):
+            return col
+    raise ValueError(
+        "could not find a geometry column; columns are "
+        f"{list(df.columns)}. Pass geometry_col= to say which one it is."
+    )
+
+
+def load_lines(src, geometry_col: str | None = None, crs=None) -> gpd.GeoDataFrame:
+    """Load linestrings from a GeoParquet, a plain parquet, or a loaded frame.
+
+    Plain parquet files (no geo metadata) are read with pandas and their WKB or
+    WKT geometry column is decoded. Those files carry no CRS of their own, so
+    pass `crs=` for them.
+    """
     if isinstance(src, gpd.GeoDataFrame):
-        return src
-    if isinstance(src, (str, os.PathLike)):
+        gdf = src
+    elif isinstance(src, pd.DataFrame):
+        gdf = _decode_geometry(src, geometry_col, crs)
+    elif isinstance(src, (str, os.PathLike)):
         path = Path(src)
         if not path.exists():
-            raise FileNotFoundError(f"no such GeoParquet file: {path}")
-        return gpd.read_parquet(path)
-    raise TypeError(
-        f"expected a GeoDataFrame or a path to a GeoParquet file, got {type(src).__name__}"
-    )
+            raise FileNotFoundError(f"no such parquet file: {path}")
+        try:
+            gdf = gpd.read_parquet(path)
+        except ValueError as err:
+            if "geo metadata" not in str(err).lower():
+                raise
+            gdf = _decode_geometry(pd.read_parquet(path), geometry_col, crs)
+    else:
+        raise TypeError(
+            f"expected a GeoDataFrame or a path to a parquet file, got {type(src).__name__}"
+        )
+
+    if geometry_col is not None and gdf.geometry.name != geometry_col:
+        gdf = gdf.set_geometry(geometry_col)
+    if crs is not None and gdf.crs is None:
+        gdf = gdf.set_crs(crs)
+    return gdf
+
+
+def _decode_geometry(df: pd.DataFrame, geometry_col: str | None, crs) -> gpd.GeoDataFrame:
+    col = geometry_col or _guess_geometry_col(df)
+    values = df[col]
+    sample = values.dropna()
+    if sample.empty:
+        raise ValueError(f"geometry column {col!r} is empty")
+    if isinstance(sample.iloc[0], (bytes, bytearray)):
+        geom = gpd.GeoSeries.from_wkb(values, crs=crs)
+    else:
+        geom = gpd.GeoSeries.from_wkt(values.str.replace(r"^SRID=\d+;", "", regex=True), crs=crs)
+    if crs is None:
+        raise ValueError(
+            f"{col!r} was decoded from a plain parquet, which carries no CRS. "
+            "Pass crs= (for example crs='EPSG:4326') so distances are meaningful."
+        )
+    return gpd.GeoDataFrame(df.drop(columns=[col]), geometry=geom, crs=crs)
+
+
+def _as_gdf(src) -> gpd.GeoDataFrame:
+    return load_lines(src)
 
 
 def _to_single_line(geom):

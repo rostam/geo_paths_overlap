@@ -1,8 +1,9 @@
 import geopandas as gpd
+import pandas as pd
 import pytest
 
 from make_examples import CASES, build
-from overlap import OverlapParams, find_overlaps
+from overlap import OverlapParams, find_overlaps, load_lines
 
 PARAMS = OverlapParams(tolerance_m=20.0, min_overlap_m=50.0)
 
@@ -113,6 +114,50 @@ def test_missing_file_and_bad_type_are_reported_clearly(parquet_pair):
         find_overlaps(path_a, "does_not_exist.parquet", PARAMS)
     with pytest.raises(TypeError):
         find_overlaps(path_a, 42, PARAMS)
+
+
+def _plain_parquet(gdf, path, col="complete_cable_geometry", as_wkt=False):
+    """Write a parquet with no geo metadata, geometry as a plain WKB/WKT column."""
+    df = pd.DataFrame(gdf.drop(columns=[gdf.geometry.name]))
+    df[col] = gdf.geometry.to_wkt() if as_wkt else gdf.geometry.to_wkb()
+    df.to_parquet(path)
+    return path
+
+
+def test_plain_parquet_with_wkb_column_is_loaded(tmp_path):
+    _, gdf_b = build()
+    path = _plain_parquet(gdf_b, tmp_path / "plain_wkb.parquet")
+    loaded = load_lines(path, crs="EPSG:4326")
+    assert loaded.crs == gdf_b.crs
+    assert loaded.geometry.geom_type.eq("LineString").all()
+    assert len(loaded) == len(gdf_b)
+
+
+def test_plain_parquet_with_wkt_column_is_loaded(tmp_path):
+    _, gdf_b = build()
+    path = _plain_parquet(gdf_b, tmp_path / "plain_wkt.parquet", as_wkt=True)
+    loaded = load_lines(path, crs="EPSG:4326")
+    assert loaded.geometry.geom_type.eq("LineString").all()
+
+
+def test_plain_parquet_matches_a_geoparquet_side(tmp_path, result):
+    gdf_a, gdf_b = build()
+    path_b = _plain_parquet(gdf_b, tmp_path / "b_plain.parquet")
+    mixed = find_overlaps(
+        gdf_a,
+        load_lines(path_b, crs="EPSG:4326"),
+        PARAMS,
+        id_col_a="road_id",
+        id_col_b="road_id",
+    )
+    assert list(mixed["id_a"]) == list(result["id_a"])
+
+
+def test_plain_parquet_without_crs_says_so(tmp_path):
+    _, gdf_b = build()
+    path = _plain_parquet(gdf_b, tmp_path / "no_crs.parquet")
+    with pytest.raises(ValueError, match="carries no CRS"):
+        load_lines(path)
 
 
 def test_no_overlaps_still_produces_a_valid_empty_frame(tmp_path):

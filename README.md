@@ -28,6 +28,26 @@ overlaps = find_overlaps(
 Each input needs a CRS set and linestring geometry. A MultiLineString is merged
 into one line where its parts connect; where they don't, the longest part is used.
 
+### Plain (non-geo) parquet
+
+Not every parquet carries geo metadata; some store geometry as an ordinary WKB or
+WKT column. `load_lines` handles those too, but such files record no CRS of their
+own, so you have to supply one — a wrong guess silently corrupts every distance:
+
+```python
+from overlap import load_lines
+
+gdf = load_lines("plain.parquet", crs="EPSG:4326")        # geometry column auto-detected
+gdf = load_lines("plain.parquet", geometry_col="cable_wkb", crs="EPSG:4326")
+```
+
+To see what a file actually holds — columns, dtypes, geometry column, CRS, and a
+sample value per column — before writing any call against it:
+
+```bash
+python inspect_inputs.py a.parquet b.parquet
+```
+
 ## How matching works
 
 Line A is sampled every `--step-m` metres. A sample counts as overlapping when it
