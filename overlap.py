@@ -13,6 +13,7 @@ it appears in the left dataset.
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +42,10 @@ class OverlapParams:
 
 
 PathOrFrame = "str | os.PathLike | gpd.GeoDataFrame"
+
+# Plain parquets record no CRS, so one has to be assumed. Gauss-Kruger zone 3
+# (metres, Germany) is the house default; override with crs= per call.
+DEFAULT_PLAIN_CRS = "EPSG:31467"
 
 _GEOM_NAME_HINTS = ("geometry", "geom", "shape", "wkb", "wkt", "linestring")
 
@@ -71,7 +76,9 @@ def load_lines(src, geometry_col: str | None = None, crs=None) -> gpd.GeoDataFra
 
     Plain parquet files (no geo metadata) are read with pandas and their WKB or
     WKT geometry column is decoded. Those files carry no CRS of their own, so
-    pass `crs=` for them.
+    `crs` is assumed to be DEFAULT_PLAIN_CRS unless given. Pass `crs=` whenever
+    the file is not in that CRS: the numbers are interpreted, not validated, and
+    a wrong CRS yields confident but meaningless distances.
     """
     if isinstance(src, gpd.GeoDataFrame):
         gdf = src
@@ -92,7 +99,9 @@ def load_lines(src, geometry_col: str | None = None, crs=None) -> gpd.GeoDataFra
             f"expected a GeoDataFrame or a path to a parquet file, got {type(src).__name__}"
         )
 
-    if geometry_col is not None and gdf.geometry.name != geometry_col:
+    # Only meaningful when the named column is still a column: a decoded plain
+    # parquet has already consumed it into the active geometry.
+    if geometry_col is not None and geometry_col in gdf.columns:
         gdf = gdf.set_geometry(geometry_col)
     if crs is not None and gdf.crs is None:
         gdf = gdf.set_crs(crs)
@@ -105,20 +114,22 @@ def _decode_geometry(df: pd.DataFrame, geometry_col: str | None, crs) -> gpd.Geo
     sample = values.dropna()
     if sample.empty:
         raise ValueError(f"geometry column {col!r} is empty")
+    if crs is None:
+        crs = DEFAULT_PLAIN_CRS
+        warnings.warn(
+            f"{col!r} came from a plain parquet, which records no CRS; assuming "
+            f"{DEFAULT_PLAIN_CRS}. Pass crs= if that is wrong — distances depend on it.",
+            stacklevel=3,
+        )
     if isinstance(sample.iloc[0], (bytes, bytearray)):
         geom = gpd.GeoSeries.from_wkb(values, crs=crs)
     else:
         geom = gpd.GeoSeries.from_wkt(values.str.replace(r"^SRID=\d+;", "", regex=True), crs=crs)
-    if crs is None:
-        raise ValueError(
-            f"{col!r} was decoded from a plain parquet, which carries no CRS. "
-            "Pass crs= (for example crs='EPSG:4326') so distances are meaningful."
-        )
     return gpd.GeoDataFrame(df.drop(columns=[col]), geometry=geom, crs=crs)
 
 
-def _as_gdf(src) -> gpd.GeoDataFrame:
-    return load_lines(src)
+def _as_gdf(src, geometry_col: str | None = None, crs=None) -> gpd.GeoDataFrame:
+    return load_lines(src, geometry_col=geometry_col, crs=crs)
 
 
 def _to_single_line(geom):
@@ -231,19 +242,25 @@ def find_overlaps(
     params: OverlapParams | None = None,
     id_col_a: str | None = None,
     id_col_b: str | None = None,
+    crs_a=None,
+    crs_b=None,
+    geometry_col_a: str | None = None,
+    geometry_col_b: str | None = None,
 ) -> gpd.GeoDataFrame:
     """Match every line in `source_a` against every nearby line in `source_b`.
 
-    Each source is either a path to a GeoParquet file or an already-loaded
-    GeoDataFrame; the two can be mixed freely.
+    Each source is either a path to a parquet file (GeoParquet, or plain with a
+    WKB/WKT geometry column) or an already-loaded GeoDataFrame; the two can be
+    mixed freely. `crs_a`/`crs_b` and `geometry_col_a`/`geometry_col_b` apply
+    only to plain parquets, which carry neither.
 
     Both inputs are projected to a metre-based CRS so that the tolerances mean
     what they say. Geometry in the result is in that same metric CRS reprojected
     back to the left input's original CRS.
     """
     p = params or OverlapParams()
-    gdf_a = _as_gdf(source_a)
-    gdf_b = _as_gdf(source_b)
+    gdf_a = _as_gdf(source_a, geometry_col=geometry_col_a, crs=crs_a)
+    gdf_b = _as_gdf(source_b, geometry_col=geometry_col_b, crs=crs_b)
     if gdf_a.crs is None or gdf_b.crs is None:
         raise ValueError("both inputs need a CRS")
 
@@ -309,6 +326,10 @@ def main() -> None:
     ap.add_argument("--directional", action="store_true")
     ap.add_argument("--id-col-a")
     ap.add_argument("--id-col-b")
+    ap.add_argument("--crs-a", help=f"CRS for a plain parquet A (default {DEFAULT_PLAIN_CRS})")
+    ap.add_argument("--crs-b", help=f"CRS for a plain parquet B (default {DEFAULT_PLAIN_CRS})")
+    ap.add_argument("--geometry-col-a", help="WKB/WKT column in a plain parquet A")
+    ap.add_argument("--geometry-col-b", help="WKB/WKT column in a plain parquet B")
     args = ap.parse_args()
 
     res = find_overlaps(
@@ -324,6 +345,10 @@ def main() -> None:
         ),
         id_col_a=args.id_col_a,
         id_col_b=args.id_col_b,
+        crs_a=args.crs_a,
+        crs_b=args.crs_b,
+        geometry_col_a=args.geometry_col_a,
+        geometry_col_b=args.geometry_col_b,
     )
     res.to_parquet(args.out)
     print(f"{len(res)} overlap(s) written to {args.out}")

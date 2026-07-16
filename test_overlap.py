@@ -1,9 +1,11 @@
+import warnings
+
 import geopandas as gpd
 import pandas as pd
 import pytest
 
 from make_examples import CASES, build
-from overlap import OverlapParams, find_overlaps, load_lines
+from overlap import DEFAULT_PLAIN_CRS, OverlapParams, find_overlaps, load_lines
 
 PARAMS = OverlapParams(tolerance_m=20.0, min_overlap_m=50.0)
 
@@ -153,11 +155,49 @@ def test_plain_parquet_matches_a_geoparquet_side(tmp_path, result):
     assert list(mixed["id_a"]) == list(result["id_a"])
 
 
-def test_plain_parquet_without_crs_says_so(tmp_path):
+def test_plain_parquet_defaults_to_the_house_crs_and_warns(tmp_path):
     _, gdf_b = build()
-    path = _plain_parquet(gdf_b, tmp_path / "no_crs.parquet")
-    with pytest.raises(ValueError, match="carries no CRS"):
-        load_lines(path)
+    path = _plain_parquet(gdf_b.to_crs(DEFAULT_PLAIN_CRS), tmp_path / "default_crs.parquet")
+    with pytest.warns(UserWarning, match="records no CRS"):
+        loaded = load_lines(path)
+    assert loaded.crs == DEFAULT_PLAIN_CRS
+
+
+def test_explicit_crs_overrides_the_default_and_is_quiet(tmp_path):
+    _, gdf_b = build()
+    path = _plain_parquet(gdf_b, tmp_path / "explicit_crs.parquet")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # an explicit CRS must not warn
+        loaded = load_lines(path, crs="EPSG:4326")
+    assert loaded.crs == "EPSG:4326"
+
+
+def test_crs_b_parameter_reaches_a_plain_parquet(tmp_path, result):
+    gdf_a, gdf_b = build()
+    path_b = _plain_parquet(gdf_b, tmp_path / "b_crs_param.parquet")
+    matched = find_overlaps(
+        gdf_a, path_b, PARAMS, id_col_a="road_id", id_col_b="road_id", crs_b="EPSG:4326"
+    )
+    assert list(matched["id_a"]) == list(result["id_a"])
+
+
+def test_wrong_crs_finds_nothing(tmp_path):
+    """A CRS mismatch is silent in the data but obvious in the result."""
+    gdf_a, gdf_b = build()
+    path_b = _plain_parquet(gdf_b, tmp_path / "b_wrong.parquet")
+    # The file is really lat/lon; claiming Gauss-Kruger metres puts it elsewhere.
+    wrong = find_overlaps(
+        gdf_a, path_b, PARAMS, id_col_a="road_id", id_col_b="road_id",
+        crs_b=DEFAULT_PLAIN_CRS,
+    )
+    assert len(wrong) == 0
+
+
+def test_explicit_geometry_col_is_used(tmp_path):
+    _, gdf_b = build()
+    path = _plain_parquet(gdf_b, tmp_path / "named_col.parquet", col="cable_wkt", as_wkt=True)
+    loaded = load_lines(path, geometry_col="cable_wkt", crs="EPSG:4326")
+    assert loaded.geometry.geom_type.eq("LineString").all()
 
 
 def test_no_overlaps_still_produces_a_valid_empty_frame(tmp_path):

@@ -31,15 +31,29 @@ into one line where its parts connect; where they don't, the longest part is use
 ### Plain (non-geo) parquet
 
 Not every parquet carries geo metadata; some store geometry as an ordinary WKB or
-WKT column. `load_lines` handles those too, but such files record no CRS of their
-own, so you have to supply one — a wrong guess silently corrupts every distance:
+WKT column. `load_lines` handles those too. Such files record no CRS of their own,
+so one has to be assumed: the default is `EPSG:31467` (Gauss-Krüger zone 3,
+metres), exposed as `overlap.DEFAULT_PLAIN_CRS`. Override it per call whenever the
+file is in something else, and note that the CRS is *interpreted, not validated* —
+a wrong one produces confident, meaningless distances rather than an error:
 
 ```python
 from overlap import load_lines
 
-gdf = load_lines("plain.parquet", crs="EPSG:4326")        # geometry column auto-detected
-gdf = load_lines("plain.parquet", geometry_col="cable_wkb", crs="EPSG:4326")
+gdf = load_lines("plain.parquet")                          # assumes EPSG:31467, warns
+gdf = load_lines("plain.parquet", crs="EPSG:4326")         # explicit, no warning
+gdf = load_lines("plain.parquet", geometry_col="cable_wkt", crs="EPSG:4326")
 ```
+
+`find_overlaps` takes the same per-side, and the CLI mirrors them
+(`--crs-b`, `--geometry-col-b`):
+
+```python
+find_overlaps("a.parquet", "b_plain.parquet", crs_b="EPSG:31467", geometry_col_b="cable_wkt")
+```
+
+If overlaps come back empty against data you expect to match, a wrong CRS on one
+side is the first thing to suspect.
 
 To see what a file actually holds — columns, dtypes, geometry column, CRS, and a
 sample value per column — before writing any call against it:
